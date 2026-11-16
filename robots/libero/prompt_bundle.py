@@ -45,7 +45,7 @@ def user_prompt(variables: Mapping[str, object] | None = None) -> PromptNode:
             "MEMORY": user_parts.WAM_MEMORY,
             "BEGIN": user_parts.WAM_BEGIN,
         }
-    if (variables or {}).get("generic_tools") or (variables or {}).get("geometry"):
+    if (variables or {}).get("generic_tools"):
         return {
             "CELL": user_parts.CELL,
             "BEGIN": "Read view_env_state(step=0) and the available task memory, then execute the task using the current observations.",

@@ -429,16 +429,18 @@ WORKFLOW_STEPS = (
 def system_prompt(variables: Mapping[str, object] | None = None) -> PromptNode:
     """Assemble the LIBERO exploration system prompt."""
     enabled = bool((variables or {}).get("enable_direct_action", False))
-    if (variables or {}).get("generic_tools") or (variables or {}).get("geometry"):
+    if (variables or {}).get("generic_tools"):
         return {
             "ROLE AND MODE": ROLE,
             "YOUR GOAL": GOAL,
             "RULES": _rules(),
-            "LOCALIZATION": base.geometry_localization(variables),
+            "LOCALIZATION": base.generic_localization(variables),
             "WORKFLOW": Numbered(
                 (
                     BASE_STEP_INSPECT_INITIAL,
                     STEP_READ_MEMORY,
+                    BASE_STEP_READ_SEED0_REFS,
+                    BASE_STEP_EXECUTE,
                     base.allowed_primitives(enabled) + STEP_PRIMITIVES,
                     STEP_RECOVERY,
                     STEP_CLOSE_OUT,

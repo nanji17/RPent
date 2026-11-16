@@ -16,20 +16,40 @@
 
 from __future__ import annotations
 
-import io
 import threading
-from typing import Annotated
+from typing import TYPE_CHECKING, Annotated, Protocol
 from uuid import uuid4
 
 import numpy as np
-from PIL import Image
 from pydantic import Field, ValidationError
 
 from rpent.session import EnvState
 from rpent.tools import ToolResult, tool
-from toolkits.geometry.image_selection import ImageSelection, Index, Size
-from toolkits.geometry.observation import GeometryObservation, ObservationProvider
-from toolkits.geometry.perception import Segmenter
+from toolkits.observation import (
+    GeometryObservation,
+    ImageSelection,
+    Index,
+    ObservationProvider,
+    Size,
+)
+
+if TYPE_CHECKING:
+    from rpent.robots.components.sam3_client import Sam3Result
+
+
+class Segmenter(Protocol):
+    """Produce masks using text or a positive row/column point prompt."""
+
+    def segment(
+        self,
+        image: bytes,
+        *,
+        text_prompt: str | None = None,
+        point: list[int] | None = None,
+        min_score: float = 0.2,
+    ) -> Sam3Result:
+        """Return a mask at the supplied RGB resolution, or no candidate."""
+        ...
 
 
 class SegmentTool:
@@ -76,11 +96,9 @@ class SegmentTool:
             observation = self._observations.get_observation(camera=camera, step=step)
             if observation.camera != camera or (step >= 0 and observation.step != step):
                 raise ValueError("Provider returned a different camera or step.")
-            buf = io.BytesIO()
-            Image.fromarray(observation.rgb).save(buf, format="PNG")
             return self.segment_observation(
                 observation,
-                buf.getvalue(),
+                observation.png_bytes(),
                 tag=self._namespace,
                 prompt=prompt or None,
                 point=point,

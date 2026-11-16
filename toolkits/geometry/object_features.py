@@ -14,15 +14,11 @@
 
 """Measure whole-object features after one native point and one verified object mask."""
 
-import io
-
 import numpy as np
-from PIL import Image
 
 from toolkits.geometry import target_identity
 from toolkits.geometry.measured_rectangle import observed_face, rectangle_value
 from toolkits.geometry.package_identity import package_description, select_package
-from toolkits.geometry.part_geometry import PART_DEFINITIONS
 from toolkits.geometry.rgbd_parts import (
     cuboid_vertices,
     measure,
@@ -30,7 +26,11 @@ from toolkits.geometry.rgbd_parts import (
 )
 
 FEATURES = {
-    **PART_DEFINITIONS,
+    "inner_rim_center": "3d_center_in_observed_inner_upper_opening_edge_plane",
+    "plate_center": "circular_support_surface_center_at_fitted_support_plane_height",
+    "lid_center": "sealed_circular_lid_center_in_fitted_lid_plane",
+    "rectangle_center": "center_of_complete_observed_main_rectangular_top_face",
+    "body_segment_center": "axis_midpoint_of_observed_main_cylindrical_barrel_excluding_neck_and_mouth",
     "inner_rim_radius": "inner_opening_radius_at_the_observed_lip_ridge",
     "rim_extrema": "inner_lip_extrema_left_right_near_far_in_the_projected_camera_basis",
     "top_corners": "top_face_corners_far_left_far_right_near_left_near_right",
@@ -48,13 +48,10 @@ def run(
     grounder,
     segmenter,
     cancel,
-    region_source,
-    refiner=None,
     *,
     evidence=None,
     direction_camera=None,
     projected_rc=None,
-    segment_fallback=False,
 ):
     output_names = data.get("required_geometry", [])
     requested = list(output_names)
@@ -65,12 +62,9 @@ def run(
                 + ["top_corners", "supported_height"]
             )
         )
-    buf = io.BytesIO()
-    Image.fromarray(observation.rgb).save(buf, format="PNG")
-    image = buf.getvalue()
+    image = observation.png_bytes()
     h, w = observation.rgb.shape[:2]
     native = projected_rc
-    selected = None
     if native is None:
         selected = grounder.ground(image, data["query"])
         data["calls"]["grounding"] += 1
@@ -82,14 +76,9 @@ def run(
     if native is not None:
         row, col = native
         data["pixel_rc"] = list(native)
-        if observation.valid_mask[tuple(native)]:
-            # A proposal can guide a camera even if it never earns a target coordinate.
-            data["inspection_anchor"] = {
-                "step": observation.step,
-                "camera": observation.camera,
-                "world_frame_id": observation.world_frame_id,
-                "xyz": observation.world_xyz[tuple(native)].tolist(),
-            }
+        if evidence is not None and observation.valid_mask[tuple(native)]:
+            # Only use the proposal to check the same surface in a synchronized view.
+            evidence["anchor_xyz"] = observation.world_xyz[tuple(native)]
     cloud = None
     candidates = {}
     regions = {}
@@ -100,12 +89,8 @@ def run(
     relational = subject != data["query"]
     # Color/label shortcuts do not verify the relation to the landmarks.
     hue = None if relational else target_identity.box_color(subject)
-    box_search = hue is not None and region_source in ("depth", "hybrid")
-    package = (
-        package_description(data["query"])
-        if not relational and region_source in ("depth", "hybrid")
-        else None
-    )
+    box_search = hue is not None
+    package = None if relational else package_description(subject)
     if package is not None:
         proposal, reason = select_package(
             observation, data["query"], package, native, grounder, data, cancel
@@ -137,131 +122,63 @@ def run(
     elif native is not None:
         reason = "no_consistent_object_mask"
         camera = observation.camera_to_world
-        if region_source in ("depth", "hybrid"):
-            from toolkits.geometry.depth_foreground import (
-                anchored_plane,
-                described_lightness,
-                foreground,
+        from toolkits.geometry.depth_foreground import (
+            anchored_plane,
+            described_lightness,
+            foreground,
+        )
+
+        appearance = described_lightness(subject)
+
+        mask, depth_info = foreground(
+            observation.world_xyz,
+            observation.valid_mask,
+            observation.up_direction,
+            camera,
+            [row, col],
+            rgb=observation.rgb,
+            lightness=appearance,
+        )
+        data["depth_selection"] = depth_info
+        if any(
+            k
+            in (
+                "top_size",
+                "top_corners",
+                "rectangle_center",
+                "lid_center",
+                "plate_center",
+                "supported_height",
+                "height_above_support",
             )
-
-            appearance = described_lightness(subject)
-
-            mask, depth_info = foreground(
+            for k in requested
+        ):
+            plane = anchored_plane(
                 observation.world_xyz,
                 observation.valid_mask,
                 observation.up_direction,
                 camera,
                 [row, col],
-                rgb=observation.rgb,
-                lightness=appearance,
             )
-            if (
-                refiner is not None
-                and projected_rc is None
-                and depth_info.get("nearby_components", 0) >= 2
-            ):
-                cancel()
-                second = refiner(image, data["query"], selected)
-                data["calls"]["grounding"] += 1
-                data["initial_pixel_rc"] = [row, col]
-                if second.found and second.point_xy is not None:
-                    x, y = second.point_xy
-                    if second.image_size != (w, h) or not (0 <= x < w and 0 <= y < h):
-                        raise ValueError("confirmation point raster mismatch")
-                    sr, sc = min(h - 1, round(y)), min(w - 1, round(x))
-                    data["confirmation_pixel_rc"] = [sr, sc]
-                    candidate, info = foreground(
-                        observation.world_xyz,
-                        observation.valid_mask,
-                        observation.up_direction,
-                        camera,
-                        [sr, sc],
-                        rgb=observation.rgb,
-                        lightness=appearance,
-                    )
-                    if candidate is not None and info["anchor_distance_px"] <= 3:
-                        yy, xx = np.nonzero(candidate)
-                        if (
-                            np.min(np.hypot(yy - row, xx - col))
-                            <= depth_info["confirmation_radius_px"]
-                        ):
-                            mask, depth_info = candidate, info
-                            row, col = sr, sc
-                            data["pixel_rc"] = [row, col]
-            data["depth_selection"] = depth_info
-            if any(
-                k
-                in (
-                    "top_size",
-                    "top_corners",
-                    "rectangle_center",
-                    "lid_center",
-                    "plate_center",
-                    "supported_height",
-                    "height_above_support",
+            if plane is not None:
+                regions["anchor_plane"] = plane
+                candidates["anchor_plane"] = observation.world_xyz[plane]
+                data["plane_touches_frame"] = bool(
+                    plane[0].any()
+                    or plane[-1].any()
+                    or plane[:, 0].any()
+                    or plane[:, -1].any()
                 )
-                for k in requested
-            ):
-                plane = anchored_plane(
-                    observation.world_xyz,
-                    observation.valid_mask,
-                    observation.up_direction,
-                    camera,
-                    [row, col],
-                )
-                if plane is not None:
-                    regions["anchor_plane"] = plane
-                    candidates["anchor_plane"] = observation.world_xyz[plane]
-                    data["plane_touches_frame"] = bool(
-                        plane[0].any()
-                        or plane[-1].any()
-                        or plane[:, 0].any()
-                        or plane[:, -1].any()
-                    )
-            if mask is not None:
-                regions["depth"] = mask
-                candidates["depth"] = object_points(
-                    observation.world_xyz, observation.valid_mask, mask, camera[:3, 2]
-                )
-        prompts = (
-            ({"text_prompt": data["query"]}, {"point": [row, col]})
-            if region_source in ("sam", "hybrid") and segmenter is not None
-            else ()
-        )
-        for prompt in prompts:
-            cancel()
-            mask = segmenter.segment(image, **prompt)
-            data["calls"]["segment"] += 1
-            if mask.found:
-                if mask.mask.shape != (h, w) or mask.mask.dtype != np.bool_:
-                    raise ValueError("object mask does not match RGB")
-                if mask.mask[row, col]:
-                    camera = observation.camera_to_world
-                    cloud = object_points(
-                        observation.world_xyz,
-                        observation.valid_mask,
-                        mask.mask,
-                        None if camera is None else camera[:3, 2],
-                    )
-                    regions["sam"] = mask.mask
-                    candidates["sam"] = cloud
-                    data["mask_pixels"] = int(mask.mask.sum())
-                    data["mask_touches_frame"] = bool(
-                        mask.mask[0].any()
-                        or mask.mask[-1].any()
-                        or mask.mask[:, 0].any()
-                        or mask.mask[:, -1].any()
-                    )
-                    data["segment_mode"] = (
-                        "text" if "text_prompt" in prompt else "point"
-                    )
-                    break
+        if mask is not None:
+            regions["depth"] = mask
+            candidates["depth"] = object_points(
+                observation.world_xyz, observation.valid_mask, mask, camera[:3, 2]
+            )
     if (
         not box_search
         and package is None
         and native is not None
         and data.get("pixel_rc") is not None
-        and region_source in ("depth", "hybrid")
         and any(k in ("rectangle_center", "top_corners", "top_size") for k in requested)
     ):
         from toolkits.geometry.chromatic_region import colored_region, described_hue
@@ -290,9 +207,7 @@ def run(
                     "interior_pixel_rc": core,
                 }
             # A nearby uncolored surface cannot substitute for the requested object.
-            candidates = {
-                k: v for k, v in candidates.items() if k in ("sam", "color_depth")
-            }
+            candidates = {k: v for k, v in candidates.items() if k == "color_depth"}
             regions = {k: v for k, v in regions.items() if k in candidates}
             if not candidates:
                 reason = "described_color_has_no_unambiguous_depth_contour"
@@ -348,14 +263,12 @@ def run(
         for source in (
             "package",
             "color_depth",
-            "sam",
             "depth",
             "anchor_plane",
             "sam_fallback",
         ):
             if (
                 source == "sam_fallback"
-                and segment_fallback
                 and segmenter is not None
                 and not box_search
                 and package is None
@@ -459,7 +372,7 @@ def run(
         warnings = []
         cam = observation.camera_to_world
         order = (
-            ("depth", "sam")
+            ("depth",)
             if name
             not in (
                 "rectangle_center",
@@ -467,7 +380,7 @@ def run(
                 "top_corners",
                 "height_above_support",
             )
-            else ("sam", "depth", "anchor_plane")
+            else ("depth", "anchor_plane")
         )
         if name in ("rectangle_center", "top_size", "top_corners") and data.get(
             "plane_touches_frame"
@@ -581,9 +494,7 @@ def run(
                 continue
             if quality.get("coverage", 360) < 235:
                 warnings.append("partial_circular_arc")
-            if (source == "sam" and data.get("mask_touches_frame")) or (
-                source == "anchor_plane" and data.get("plane_touches_frame")
-            ):
+            if source == "anchor_plane" and data.get("plane_touches_frame"):
                 warnings.append("object_mask_touches_image_border")
             if source == "depth" and data["depth_selection"]["anchor_distance_px"] > 3:
                 warnings.append("grounded_pixel_adjacent_to_depth_component")
@@ -665,9 +576,7 @@ def run(
         else "usable",
     )
     if count < len(fields):
-        data["observation_request"] = {
-            "missing_geometry": [k for k, f in fields.items() if f["value"] is None]
-        }
+        data["missing_geometry"] = [k for k, f in fields.items() if f["value"] is None]
     data["identity_evidence"] = decisions
     if not count:
         if evidence is not None:

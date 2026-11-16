@@ -27,32 +27,6 @@ import numpy as np
 from rpent.utils.rpc import RpcClient
 
 
-def identity_prompt(query: str | None, *, isolated: bool = False) -> str:
-    """Ask the same local model to identify the candidate and its context."""
-    if query is None and not isolated:
-        return (
-            "Read the visible packaging. What product is it? Give its product name "
-            "and any brand or words you can make out. Use only this image. "
-            "If the product cannot be identified, answer unknown."
-        )
-    if query is None:
-        return (
-            "What object is shown on the gray background? Give its specific common name "
-            "in one short noun phrase. If its identity cannot be seen, answer unknown."
-        )
-    if isolated:
-        return (
-            f"Look at the isolated object on the gray background. Can you visually identify it as {query}? "
-            "Answer yes only if the visible appearance identifies the target. If it is a different "
-            "object, too blurry, or ambiguous, answer no. Answer yes or no."
-        )
-    return (
-        "The left image isolates a measured surface. The right shows the same "
-        f"surface with its surroundings. Is this surface part of {query}? "
-        "Use visible shape, color and context. Answer yes or no."
-    )
-
-
 @dataclass(frozen=True)
 class MolmoResult:
     """One visible pixel on the queried object or part, if found."""
@@ -71,10 +45,10 @@ class MolmoClient:
         client: RpcClient,
         *,
         timeout_s: float = 180.0,
-        point_mode: Literal["manipulation", "geometry", "native"] = "manipulation",
+        point_mode: Literal["manipulation", "native"] = "manipulation",
     ) -> None:
-        if point_mode not in ("manipulation", "geometry", "native"):
-            raise ValueError("point_mode must be manipulation, geometry or native")
+        if point_mode not in ("manipulation", "native"):
+            raise ValueError("point_mode must be manipulation or native")
         self._client = client
         self._timeout_s = timeout_s
         self._point_mode = point_mode
@@ -88,9 +62,7 @@ class MolmoClient:
 
         The pixel comes back in the image's own resolution as ``(col, row)``,
         which is the order the model writes it in and the reverse of the
-        ``[row, col]`` that SAM3 takes. Configure ``point_mode="geometry"``
-        for a material point on an exact part; the default retains Flash's
-        manipulation-point prompt.
+        ``[row, col]`` that SAM3 takes. Use ``point_mode="native"`` to request one point in the original image.
         """
         if not isinstance(query, str) or not query.strip():
             raise ValueError("ground requires a non-empty query")

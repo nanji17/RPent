@@ -219,23 +219,6 @@ def test_molmo_client_reports_a_miss_without_a_point() -> None:
     assert result.answer == "no object here"
 
 
-def test_geometry_mode_preserves_material_part_query_and_original_resolution():
-    facade = _InferenceMolmo('<points coords="1 1 125 750"/>')
-    rpc = _LoopbackRpcClient(facade)
-    query = "the inner upper rim of the blue-and-white cup left of the red box"
-    result = MolmoClient(rpc, point_mode="geometry").ground(_png(), query)
-    assert result.found and result.image_size == (800, 400)
-    assert result.point_xy == (100, 300)  # col scales by width; row by height.
-    assert rpc.calls[0][1]["point_mode"] == "geometry"
-    prompt = facade.messages[0]["content"][0]["text"]
-    assert prompt.endswith("Target and part: " + query)
-    assert "not a grasp point or an empty geometric center" in prompt
-    assert "inner upper edge" in prompt and "without point markup" in prompt
-    assert "away from edges" not in prompt
-    assert facade.generation_options["max_new_tokens"] == 96
-    assert facade.generation_options["do_sample"] is False
-
-
 @pytest.mark.parametrize(
     "answer,expected",
     [
@@ -248,9 +231,9 @@ def test_geometry_mode_preserves_material_part_query_and_original_resolution():
         ('<points coords="2 1 125 750"/>', None),
     ],
 )
-def test_geometry_mode_handles_border_and_unresolved_points(answer, expected):
+def test_native_mode_handles_border_and_unresolved_points(answer, expected):
     result = MolmoClient(
-        _LoopbackRpcClient(_InferenceMolmo(answer)), point_mode="geometry"
+        _LoopbackRpcClient(_InferenceMolmo(answer)), point_mode="native"
     ).ground(_png(), "the sealed top lid of the blue-and-yellow soup can")
     assert result.found is (expected is not None)
     assert result.point_xy == expected

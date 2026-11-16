@@ -22,7 +22,7 @@ import numpy as np
 from scipy.spatial import cKDTree
 
 from rpent.tools import ToolResult
-from toolkits.geometry.observation import GeometryObservation
+from toolkits.observation import GeometryObservation
 
 
 def _missing(result):
@@ -126,6 +126,7 @@ def _merge_fields(primary, candidate):
         )
         if not missing:
             primary.pop("reason", None)
+            primary.pop("missing_geometry", None)
     return merged
 
 
@@ -187,8 +188,8 @@ def observe_with_alternatives(
     ambiguous = _definite_twins(first)
     source_points = evidence.get("points")
     # An unverified model guess is not a constraint on a different camera.
-    if source_points is None and ambiguous and first.get("inspection_anchor"):
-        source_points = np.asarray([first["inspection_anchor"]["xyz"]])
+    if source_points is None and ambiguous and "anchor_xyz" in evidence:
+        source_points = np.asarray([evidence["anchor_xyz"]])
     extra = getattr(provider, "additional_observations", None)
     if _missing(first) and callable(extra):
         for obs in _available_views(extra, primary, skipped):
@@ -322,7 +323,6 @@ def observe_with_alternatives(
         "skipped": skipped,
         "used_additional": used,
     }
-    previous = data.pop("observation_request", {})
     if _missing(data):
         quantities = data.get("geometry", {})
         missing = [
@@ -334,11 +334,7 @@ def observe_with_alternatives(
             data["missing_geometry"] = missing
         if data["status"] == "need_observation":
             data["status"] = "insufficient_evidence"
-            data.setdefault(
-                "reason", previous.get("reason") or "requested_geometry_not_observable"
-            )
-    # A camera proposal is internal; it is never a target coordinate.
-    data.pop("inspection_anchor", None)
+            data.setdefault("reason", "requested_geometry_not_observable")
     data["calls"] = calls
     data["elapsed_ms"] = round((time.perf_counter() - start) * 1000, 2)
     return best

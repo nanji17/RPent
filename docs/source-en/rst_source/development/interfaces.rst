@@ -117,6 +117,41 @@ at safe boundaries. After the planner has also drained its old requests,
 ``resume_calls()`` accepts new calls. ``close()`` permanently closes admission;
 subclasses call ``super().close()`` before saving recordings or releasing resources.
 
+.. _geometry-toolkit:
+
+Shared RGB-D tools
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+A robot adapter supplies the camera name, recorded step and an aligned
+``GeometryObservation`` from ``toolkits.observation``. Supply RGB with world
+XYZ in metres or with optical-axis depth in metres, intrinsics and a
+camera-to-world transform. Each frame has a world-frame ID. For named
+geometry provide the camera pose and world up direction. An adapter can
+offer other calibrated cameras from the same step through
+``additional_observations``. The robot registers tools with ``add_tool`` and
+injects its observation provider and model clients.
+
+* ``back_project`` samples visible surfaces. Pass ``camera``, ``step`` and
+  ``selection`` with the displayed ``image_shape`` (height, width) and either
+  ``points_rc`` or a half-open ``box_rc`` (top, left, bottom, right).
+  An optional ``height_m`` filters along world up. Invalid or filtered
+  points retain their positions as null in the result.
+* ``segment`` accepts text, one positive pixel, or both. A text mask must
+  cover the supplied pixel and pass the score threshold to return a
+  candidate coordinate. Give the preview size when selecting on a preview.
+  The result links to the saved mask and overlay.
+* ``geometry`` takes a target description in ``query``, a camera and a step.
+  Its local Molmo point agent selects and verifies the target. Request a
+  visible surface point, a region or a list of fitted quantities through
+  ``required_geometry``, for example ``["rim_center", "object_height"]``.
+  The planner receives accepted values, warnings and the evidence reference.
+  When the recorded views cannot identify the target, ``insufficient_evidence``
+  returns control to the planner.
+
+LIBERO's API planner exposes ``back_project`` and ``segment`` by default
+with its SAM3 service. To add ``geometry``, start a local Molmo service and
+pass ``--geometry --molmo-endpoint "$MOLMO_ENDPOINT"`` to the LIBERO runner.
+
 Inter-process Communication
 ---------------------------
 

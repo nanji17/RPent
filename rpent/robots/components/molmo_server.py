@@ -23,8 +23,8 @@ Runs under the ``molmo`` extra's own interpreter, which does not have RPent
 installed -- hence the explicit ``PYTHONPATH``.
 
 The ``molmo.ground`` RPC selects an open-vocabulary point over HTTP or socket.
-Its default manipulation mode serves Flash. Geometry mode selects a visible
-material point on an exact object part using the same loaded Molmo2 model.
+Flash uses the manipulation prompt. Geometry requests a single native point and
+uses ``molmo.verify`` on the same model to check the identity of a proposed region.
 """
 
 from __future__ import annotations
@@ -41,7 +41,6 @@ from typing import Any, Literal
 
 from PIL import Image
 
-from rpent.robots.components.molmo_client import identity_prompt
 from rpent.utils.logging import get_logger
 from rpent.utils.rpc import RpcFacade
 
@@ -52,6 +51,32 @@ logger = get_logger("molmo_server")
 _COORDS = re.compile(r"<(?:point|points)\b[^>]*\bcoords=[\"']([^\"']+)[\"']", re.I)
 _POINT = re.compile(r"[0-9]+[ \t]+([0-9]{3,4})[ \t]+([0-9]{3,4})")
 _SINGLE_POINT = re.compile(r"(?:1[ \t]+)?[0-9]+[ \t]+([0-9]{3,4})[ \t]+([0-9]{3,4})")
+
+
+def _identity_prompt(query: str | None, *, isolated: bool = False) -> str:
+    """Ask the same local model to identify the candidate and its context."""
+    if query is None and not isolated:
+        return (
+            "Read the visible packaging. What product is it? Give its product name "
+            "and any brand or words you can make out. Use only this image. "
+            "If the product cannot be identified, answer unknown."
+        )
+    if query is None:
+        return (
+            "What object is shown on the gray background? Give its specific common name "
+            "in one short noun phrase. If its identity cannot be seen, answer unknown."
+        )
+    if isolated:
+        return (
+            f"Look at the isolated object on the gray background. Can you visually identify it as {query}? "
+            "Answer yes only if the visible appearance identifies the target. If it is a different "
+            "object, too blurry, or ambiguous, answer no. Answer yes or no."
+        )
+    return (
+        "The left image isolates a measured surface. The right shows the same "
+        f"surface with its surroundings. Is this surface part of {query}? "
+        "Use visible shape, color and context. Answer yes or no."
+    )
 
 
 def _parse_point(
@@ -135,29 +160,12 @@ class MolmoFacade(RpcFacade):
         image_bytes: bytes,
         query: str,
         *,
-        point_mode: Literal["manipulation", "geometry", "native"] = "manipulation",
+        point_mode: Literal["manipulation", "native"] = "manipulation",
     ) -> MolmoResult:
         """Run one grounding prompt against the loaded model."""
         image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
         width, height = image.size
-        if point_mode == "geometry":
-            prompt = (
-                "Point to one visible material point on the exact object and "
-                "part described below. Match the object's appearance and spatial "
-                "relations to distinguish it from similar objects. Select a "
-                "pixel on the requested physical surface or boundary, not a "
-                "grasp point or an empty geometric center. For a rim, select "
-                "rim material, not the empty opening or interior floor; an inner "
-                "rim means the inner upper edge. For a lid or top face, select "
-                "that face, not the side wall or its label. A requested edge "
-                "must stay on that edge. Do not substitute another part or "
-                "object. If the target or requested part is absent, fully "
-                "occluded, or cannot be uniquely identified, reply 'not found' "
-                "without point markup. Otherwise return exactly one point in "
-                "native Molmo2 point markup, with no explanation.\n"
-                f"Target and part: {query}"
-            )
-        elif point_mode == "native":
+        if point_mode == "native":
             prompt = f"Point to {query.rstrip('.')}."
         else:
             prompt = (
@@ -165,7 +173,7 @@ class MolmoFacade(RpcFacade):
                 "safe manipulation point yourself, on visible object surface and "
                 "away from edges. Return one point only."
             )
-        answer = self._generate(image, prompt, 96 if point_mode == "geometry" else 48)
+        answer = self._generate(image, prompt, 48)
         normalized = _parse_point(answer, require_single=point_mode != "manipulation")
         point = None
         if normalized is not None:
@@ -215,7 +223,7 @@ class MolmoFacade(RpcFacade):
         return {
             "answer": self._generate(
                 image,
-                identity_prompt(query, isolated=isolated),
+                _identity_prompt(query, isolated=isolated),
                 32 if query is None and not isolated else 20 if query is None else 8,
                 skip_special_tokens=True,
             )
@@ -226,10 +234,10 @@ class MolmoFacade(RpcFacade):
         image_base64: str,
         query: str,
         *,
-        point_mode: Literal["manipulation", "geometry", "native"] = "manipulation",
+        point_mode: Literal["manipulation", "native"] = "manipulation",
     ) -> dict[str, Any]:
-        if point_mode not in ("manipulation", "geometry", "native"):
-            raise ValueError("point_mode must be manipulation, geometry or native")
+        if point_mode not in ("manipulation", "native"):
+            raise ValueError("point_mode must be manipulation or native")
         if not isinstance(query, str) or not query.strip():
             raise ValueError("ground requires a non-empty query")
         query = query.strip()

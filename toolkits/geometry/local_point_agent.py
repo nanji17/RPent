@@ -16,13 +16,22 @@
 
 from __future__ import annotations
 
+from typing import Protocol
+
 from pydantic import BaseModel, FiniteFloat, PositiveInt
 from pydantic_ai import Agent, BinaryContent
 from pydantic_ai.messages import ModelResponse, ToolCallPart, UserPromptPart
 from pydantic_ai.models.function import FunctionModel
 
 from rpent.robots.components.molmo_client import MolmoResult
-from toolkits.geometry.perception import VisualGrounder
+
+
+class VisualGrounder(Protocol):
+    """Select an original-image column/row point from RGB and a description."""
+
+    def ground(self, image: bytes, query: str) -> MolmoResult:
+        """Return a visible point or an absent target."""
+        ...
 
 
 class PointOutput(BaseModel):
@@ -35,8 +44,6 @@ class PointOutput(BaseModel):
 
 class LocalPointAgent:
     """Translate structured agent I/O to one local native point call without a text planner."""
-
-    whole_object_pointing = True
 
     def __init__(self, backend: VisualGrounder):
         self._backend = backend

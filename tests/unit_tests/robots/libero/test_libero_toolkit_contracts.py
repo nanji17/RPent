@@ -28,6 +28,7 @@ import numpy as np
 import pytest
 
 from robots.libero import robot_spec, toolkit
+from robots.libero.observations import LiberoGeometryObservations, view_geometry_state
 from rpent.dashboard.events import NullDashboardEventSink
 from rpent.memory import MemoryManager
 from rpent.robots import RunConfig
@@ -171,124 +172,113 @@ def test_toolkit_factory_configures_memory_access_by_mode(
     assert captured[1]["attempts_per_session"] == 2
 
 
-def test_geometry_menu_registers_all_three_read_only_tools(
-    tmp_path, monkeypatch, fake_single_arm_primitives
+@pytest.mark.parametrize("enabled", [False, True])
+def test_generic_localization_is_registered_with_libero_observations(
+    tmp_path, monkeypatch, fake_single_arm_primitives, enabled
 ):
-    from toolkits.geometry.geometry_tool import GeometryTool
-
     fake = fake_single_arm_primitives.for_robot(toolkit.libero_tools.LiberoPrimitives)
     monkeypatch.setattr(toolkit.libero_tools, "LiberoPrimitives", fake)
     monkeypatch.setattr(toolkit.libero_tools, "dump_state", lambda *a, **kw: _record())
     monkeypatch.setattr(
         templates, "default_variables", lambda: {"output_dir": str(tmp_path)}
     )
-    prompts = []
+    mask = np.ones((4, 4), dtype=bool)
+    sam = SimpleNamespace(
+        segment=lambda *a, **kw: Sam3Result(found=True, mask=mask, score=0.9)
+    )
+    tk = toolkit.LiberoToolkit(
+        runtime_kwargs={"env": object(), "sam3_client": sam},
+        generic_tools=True,
+        geometry_grounder=object() if enabled else None,
+        dashboard_events=NullDashboardEventSink(),
+        memory=MemoryManager(tmp_path / "memory"),
+        state_output_dir=tmp_path / "state",
+    )
+    assert _tool_names(tk) == EVALUATION_TOOLS | ({"geometry"} if enabled else set())
+    assert {"back_project", "segment"} <= _readonly_names(tk)
+    if enabled:
+        assert "geometry" in _readonly_names(tk)
+        schema = tk._tools["geometry"].input_schema["properties"]
+        assert set(schema) == {
+            "query",
+            "camera",
+            "step",
+            "measurement",
+            "required_geometry",
+        }
 
-    def infer_mask(image, **kwargs):
-        prompts.append(kwargs)
-        return Sam3Result(
-            found=True, mask=np.ones((4, 4), dtype=bool), score=0.9, box=[0, 0, 4, 4]
+    with tk.state.record_step(state={}) as step:
+        tk.state.save("agentview_high.png", np.zeros((4, 4, 3), np.uint8), step=step)
+        points = np.ones((4, 4, 3))
+        points[3, 1] = [0.25, 0.5, 0.75]
+        tk.state.save("agentview_world_high.npz", points, step=step)
+        tk.state.save(
+            "agentview_metadata.json",
+            {
+                "height": 4,
+                "width": 4,
+                "intrinsic_K": np.eye(3).tolist(),
+                "extrinsic_cam2world": np.eye(4).tolist(),
+            },
+            step=step,
         )
+    selected = tk.execute_tool(
+        "back_project",
+        {
+            "camera": "agentview",
+            "step": step,
+            "selection": {"image_shape": [2, 2], "points_rc": [[1, 0]]},
+        },
+    )
+    assert selected.data["samples_xyz"] == [[0.25, 0.5, 0.75]]
+    segmented = tk.execute_tool(
+        "segment", {"camera": "agentview", "step": step, "prompt": "cup"}
+    )
+    assert (
+        segmented.data["found"]
+        and segmented.data["evidence_status"] == "identity_unchecked"
+    )
+    assert tk.state.latest_step == step
 
-    sam = SimpleNamespace(segment=infer_mask)
-    connected = []
-    initialize = GeometryTool.__init__
 
-    def capture(self, **kwargs):
-        connected.append(kwargs["segmenter"])
-        initialize(self, **kwargs)
+def test_preview_and_saved_image_label_their_own_pixel_grids(tmp_path):
+    state = EnvState(tmp_path)
+    with state.record_step(state={}) as step:
+        state.save("agentview_high.png", np.zeros((600, 800, 3), np.uint8), step=step)
+    view = view_geometry_state(step, state=state).data["views"][0]
+    assert view["image_shape"] == [384, 512]
+    assert view["full_image_shape"] == [600, 800]
+    assert view["full_image"] == "agentview_high.png"
 
-    monkeypatch.setattr(GeometryTool, "__init__", capture)
-    menus = []
-    for enabled, geometry_only, generic in (
-        (False, False, False),
-        (False, False, True),
-        (True, False, False),
-        (True, True, False),
-    ):
-        tk = toolkit.LiberoToolkit(
-            runtime_kwargs={"env": object(), "sam3_client": sam},
-            geometry_grounder=object() if enabled else None,
-            generic_tools=generic,
-            geometry_only=geometry_only,
-            dashboard_events=NullDashboardEventSink(),
-            memory=MemoryManager(tmp_path / "memory"),
-            state_output_dir=tmp_path / f"{enabled}-{generic}-{geometry_only}",
-        )
-        menus.append(_tool_names(tk))
-        if enabled:
-            assert "geometry" in _readonly_names(tk)
-            assert {"observe_geometry", "inspection_pose"}.isdisjoint(menus[-1])
-        else:
-            assert "geometry" not in menus[-1]
-        if (enabled or generic) and not geometry_only:
-            assert {"back_project", "segment"} <= _readonly_names(tk)
-            assert {"camera", "selection", "step"} == set(
-                tk._tools["back_project"].input_schema["properties"]
-            )
-            with tk._state.record_step(state={}) as step:
-                tk._state.save(
-                    "agentview_high.png", np.zeros((4, 4, 3), np.uint8), step=step
-                )
-                xyz = np.ones((4, 4, 3))
-                xyz[3, 1] = [0.25, 0.5, 0.75]
-                tk._state.save("agentview_world_high.npz", xyz, step=step)
-                tk._state.save(
-                    "agentview_metadata.json",
-                    {
-                        "height": 4,
-                        "width": 4,
-                        "intrinsic_K": np.eye(3).tolist(),
-                        "extrinsic_cam2world": np.eye(4).tolist(),
-                    },
-                    step=step,
-                )
-            sample = tk.execute_tool(
-                "back_project",
+
+def test_pinned_wrist_sample_uses_its_own_calibration(tmp_path):
+    state = EnvState(tmp_path)
+    for x in (0.0, 0.1):
+        pose = np.eye(4)
+        pose[0, 3] = x
+        with state.record_step(state={}) as step:
+            state.save("wrist_high.png", np.zeros((8, 8, 3), dtype=np.uint8), step=step)
+            xyz = np.ones((8, 8, 3))
+            state.save("wrist_world_high.npz", xyz, step=step)
+            state.save(
+                "wrist_metadata.json",
                 {
-                    "camera": "agentview",
-                    "selection": {"image_shape": [2, 2], "points_rc": [[1, 0]]},
+                    "width": 4,
+                    "height": 4,
+                    "intrinsic_K": [[4, 0, 2], [0, 4, 2], [0, 0, 1]],
+                    "extrinsic_cam2world": pose.tolist(),
                 },
-            ).data
-            assert sample["status"] == "sampled"
-            assert sample["samples_xyz"] == [[0.25, 0.5, 0.75]]
-            assert sample["evidence_status"] == "identity_unchecked"
-            assert "world_xyz" not in sample
-            candidate = tk.execute_tool(
-                "segment",
-                {
-                    "camera": "agentview",
-                    "step": 0,
-                    "point": [1, 0],
-                    "image_shape": [2, 2],
-                },
+                step=step,
             )
-            assert prompts[-1] == {
-                "point": [3, 1],
-                "text_prompt": None,
-                "min_score": 0.2,
-            }
-            assert not candidate.is_error and candidate.data["found"]
-            assert candidate.data["evidence_status"] == "identity_unchecked"
-            assert candidate.data["world_xyz"] == [1, 1, 1]
-            assert tk._state.load(candidate.data["mask_artifact"], step=0).sum() == 16
-            assert candidate.images and tk._state.latest_step == 0
-    assert menus[0] <= menus[1]
-    assert menus[0] == menus[1]
-    assert menus[2] - menus[3] == {"back_project", "segment"}
-    assert menus[2] - menus[1] == {
-        "geometry",
-        "placement_opening",
-    }
-    assert connected == [sam, sam]
-    with pytest.raises(ValueError, match="requires a SAM3 client"):
-        toolkit.LiberoToolkit(
-            runtime_kwargs={"sam3_client": None},
-            geometry_grounder=object(),
-            dashboard_events=NullDashboardEventSink(),
-            memory=MemoryManager(tmp_path / "memory"),
-            state_output_dir=tmp_path / "missing-sam",
-        )
+    obs = LiberoGeometryObservations(state)
+    historical = obs.get_observation(camera="wrist", step=0)
+    latest = obs.get_observation(camera="wrist", step=-1)
+    assert historical.camera_to_world[0, 3] == 0.0
+    assert latest.camera_to_world[0, 3] == 0.1
+    assert historical.world_frame_id == latest.world_frame_id
+    np.testing.assert_array_equal(latest.intrinsics, [[8, 0, 4], [0, 8, 4], [0, 0, 1]])
+    with pytest.raises(ValueError, match="calibrated RGB-D pair"):
+        obs.get_observation(camera="agentview", step=0)
 
 
 def test_default_api_uses_generic_tools_with_geometry_opt_in(tmp_path):
@@ -322,7 +312,6 @@ def test_default_api_uses_generic_tools_with_geometry_opt_in(tmp_path):
         )
         assert "points_rc" in prompt and "box_rc" in prompt
         assert ("For geometry, give query" in prompt) is enabled
-        assert ("placement_opening" in prompt) is enabled
 
 
 def test_toolkit_modes_construct_with_fake_primitives(

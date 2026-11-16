@@ -519,8 +519,8 @@ OUTPUT_DISCIPLINE = """- Brief reasoning before each tool call (1-2 sentences): 
 (
     STEP_READ_GUIDES,
     STEP_INSPECT_INITIAL,
-    _,
-    _,
+    STEP_READ_MEMORY,
+    STEP_READ_SEED_REFERENCES,
     STEP_PERCEPTION_PASS,
     STEP_EXECUTE,
     STEP_PRIMITIVES,
@@ -630,7 +630,7 @@ WAM_OUTCOME = (
 )
 
 
-def geometry_localization(variables: Mapping[str, object]) -> str:
+def generic_localization(variables: Mapping[str, object]) -> str:
     """Describe the measurement entry points exposed by this toolkit."""
     sampling = """Use image_shape of the displayed preview. If you select pixels on
 full_image via read_image, use full_image_shape. Use [row,col] in one image grid.
@@ -642,31 +642,14 @@ For segment give text, a positive point, or both to check that the text mask cov
             sampling
             + "\nConfirm the target's identity in the current images before using its coordinates."
         )
-    sampling = "" if variables.get("geometry_only") else "\n" + sampling
     return f"""For geometry, give query (the target's appearance and distinguishing relation),
 camera and step. Geometry selects its own pixels and verifies the object across
 available views of that step. Choose measurement="surface_point" or "visible_region".
 For fitted parts or dimensions, use one required_geometry list for the same object,
 for example ["rim_center","object_height"]. Use only accepted fields.
-For a basket interior, placement_opening consumes a current accepted region.
 On insufficient_evidence choose another task strategy. Retry after an ordinary
-task action changes the evidence. Use read_image for full-resolution detail.{sampling}"""
-
-
-GEOMETRY_EXECUTION = """Use the demonstrated motion sequence and contact prompts where applicable.
-For a clearly visible reachable object, pi0_pick can start from home with the
-object and its relation in the instruction. Use pi0_doubled for interaction
-with a handle/door or a demonstrated multi-stage skill; inspect progress after
-short chunks. For scripted approach, move above measured material then descend.
-Carry with +1, open with -1, split travel over 0.30 m into waypoints. Recheck
-a moved payload and its offset from the gripper before release. Each motion
-returns the new observation. After native termination or truncation save one
-short audit and finish with the observed outcome."""
-
-GEOMETRY_MEMORY = """Matching published leaves under {{memory_dir}} (index {{memory_dir}}/MEMORY.md): {{geometry_memory}}.
-Read the available technique and recipe together on the first turn with step 0.
-Use the current images for locations. Consult a global leaf if a specific
-mechanics question remains."""
+task action changes the evidence. Use read_image for full-resolution detail.
+{sampling}"""
 
 
 def system_prompt(
@@ -674,38 +657,33 @@ def system_prompt(
 ) -> PromptNode:
     """Assemble the LIBERO evaluation prompt for the policy and memory profile."""
     if (variables or {}).get("policy_kind") == "wam":
-        workflow = WAM_WORKFLOW
-        if (variables or {}).get("generic_tools") or (variables or {}).get("geometry"):
-            workflow = workflow.replace(
-                "using back_project or segment", "using the localization tools below"
-            )
-            return {
-                "ROLE": WAM_ROLE,
-                "WORKFLOW": workflow,
-                "LOCALIZATION": geometry_localization(variables),
-                "OUTCOME": WAM_OUTCOME,
-            }
-        return {"ROLE": WAM_ROLE, "WORKFLOW": workflow, "OUTCOME": WAM_OUTCOME}
+        prompt = {"ROLE": WAM_ROLE, "WORKFLOW": WAM_WORKFLOW, "OUTCOME": WAM_OUTCOME}
+        if (variables or {}).get("generic_tools"):
+            prompt["LOCALIZATION"] = generic_localization(variables)
+        return prompt
     enabled = bool((variables or {}).get("enable_direct_action", False))
-    if (variables or {}).get("generic_tools") or (variables or {}).get("geometry"):
-        parts = {
+    if (variables or {}).get("generic_tools"):
+        local_memory = variables.get("memory_profile", "hf") == "local"
+        memory = (
+            (STEP_READ_LOCAL_MEMORY,)
+            if local_memory
+            else (STEP_READ_MEMORY, STEP_READ_SEED_REFERENCES)
+        )
+        return {
             "ROLE AND EVALUATION": "SINGLE-ATTEMPT MODE. Complete the instructed task in one physical episode. Only native terminated=true establishes success.",
-            "LOCALIZATION": geometry_localization(variables),
-            "WORKFLOW": allowed_primitives(enabled) + GEOMETRY_EXECUTION,
-            "MOTION": KEY_HYPERPARAMETERS,
+            "LOCALIZATION": generic_localization(variables),
+            "WORKFLOW": Numbered(
+                (
+                    STEP_INSPECT_INITIAL,
+                    *memory,
+                    allowed_primitives(enabled) + STEP_EXECUTE,
+                    STEP_RECOVERY,
+                    STEP_FINISH,
+                )
+            ),
+            "KEY HYPERPARAMETERS": KEY_HYPERPARAMETERS,
+            "OUTPUT DISCIPLINE": OUTPUT_DISCIPLINE,
         }
-        if (variables or {}).get("memory_profile", "hf") == "local" and (
-            (variables or {}).get("geometry_memory")
-            not in (None, "", "no exact task leaf")
-        ):
-            parts["MEMORY"] = GEOMETRY_MEMORY
-        else:
-            parts["MEMORY"] = (
-                "Read {{memory_dir}}/MEMORY.md before planning. "
-                "Follow its links to the relevant task and technique memories. "
-                "Use the current images for locations."
-            )
-        return parts
     if (variables or {}).get("memory_profile", "hf") == "local":
         return {
             "ROLE AND EVALUATION": ROLE_AND_EVALUATION,

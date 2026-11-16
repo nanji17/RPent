@@ -609,17 +609,10 @@ def need_observation(data, reason):
     )
     for key in (
         "pixel_rc",
-        "initial_pixel_rc",
-        "confirmation_pixel_rc",
         "surface_point_xyz",
         "visible_bounds_xyz",
         "color_depth_evidence",
     ):
         data.pop(key, None)
-    data["observation_request"] = {
-        "kind": "additional_view",
-        "target": data["query"],
-        "reason": reason,
-        "execution_owner": "parent_planner",
-        "missing_geometry": list(data.get("required_geometry", ())),
-    }
+    if data.get("required_geometry"):
+        data["missing_geometry"] = list(data["required_geometry"])

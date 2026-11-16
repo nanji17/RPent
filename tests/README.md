@@ -28,12 +28,10 @@ tests/
     │   ├── session/
     │   ├── tools/
     │   └── utils/
-    ├── robots/           # tests for the top-level robot extensions
-    │   ├── libero/
-    │   ├── robocasa/
-    │   └── robotwin/
-    └── toolkits/         # tests for reusable toolkits
-        └── geometry/     # generic observations, perception and fitting
+    └── robots/           # tests for the top-level robot extensions
+        ├── libero/
+        ├── robocasa/
+        └── robotwin/
 ```
 
 Directories that do not yet have tests do not need empty placeholders. Add
@@ -45,11 +43,6 @@ them when the first test for that module lands.
   `rpent.utils.rpc` belong in `tests/unit_tests/rpent/utils/rpc/`.
 - Mirror top-level robot extensions under `tests/unit_tests/robots/`. Put
   robot-specific coverage in that directory's `<robot>/` child.
-- Mirror top-level `toolkits` modules under `tests/unit_tests/toolkits/`.
-  Geometry smoke tests use caller-provided observations, synthetic point clouds
-  and fake model services without simulator assets or GPU dependencies.
-  Standalone evaluation checks live with the evaluator in
-  `toolkits/geometry/evaluation/test_evaluation.py`.
 - Place cross-layer tests with the primary contract owner. Registry and config
   contracts belong to `rpent/robots/`; extension toolkit and schema contracts
   belong to `robots/`.
@@ -71,7 +64,7 @@ not contact external services.
 Run the complete suite with:
 
 ```bash
-pytest tests/unit_tests toolkits/geometry/evaluation/test_evaluation.py -v
+pytest tests/unit_tests -v
 ```
 
 ## RoboCasa environment smoke tests

@@ -190,7 +190,6 @@ def get_toolkit(
         runtime_kwargs=primitive_kwargs,
         generic_tools=config.prompt_vars.get("generic_tools", False),
         geometry_grounder=geometry_grounder,
-        geometry_only=config.prompt_vars.get("geometry_only", False),
         dashboard_events=dashboard_events,
         memory=memory,
         enable_direct_action=config.enable_direct_action,
@@ -273,11 +272,6 @@ def _add_cli_args(parser: argparse.ArgumentParser, use_dashboard: bool) -> None:
         "Defaults to disabled.",
     )
     parser.add_argument(
-        "--geometry-only",
-        action="store_true",
-        help=argparse.SUPPRESS,
-    )
-    parser.add_argument(
         "--molmo-endpoint",
         default=None,
         help="[protocol://]host:port of an existing Molmo server "
@@ -333,8 +327,6 @@ def _parse_config(args: argparse.Namespace) -> RunConfig:
             raise ValueError(
                 "WAM requires --memory-profile local; no compatible HF corpus is configured"
             )
-    if getattr(args, "geometry_only", False) and not getattr(args, "geometry", False):
-        raise ValueError("--geometry-only requires --geometry")
     if planner == "flash":
         if getattr(args, "explore", False):
             raise ValueError("Flash Mode is evaluation-only; remove --explore")
@@ -403,7 +395,6 @@ def _parse_config(args: argparse.Namespace) -> RunConfig:
     prompt_vars = {
         "generic_tools": planner != "flash" or getattr(args, "geometry", False),
         "geometry": getattr(args, "geometry", False),
-        "geometry_only": getattr(args, "geometry_only", False),
         "policy_backend": policy_backend,
         "policy_kind": policy_kind,
         "suite": args.suite,
@@ -417,18 +408,6 @@ def _parse_config(args: argparse.Namespace) -> RunConfig:
         "session_number": 1,
         "session_max": max(1, args.explore_sessions) if explore else 1,
     }
-    if prompt_vars["generic_tools"] and local_eval:
-        # Local suites differ in which reference leaves were published.
-        family = args.suite.replace("libero_10", "libero10")
-        leaves = (
-            f"task-specific/{prompt_vars['reference_tag']}.json",
-            f"task-specific/{prompt_vars['reference_tag']}_recipe.jsonl",
-            f"task-family/task-family_{family}_t{args.task}.md",
-        )
-        prompt_vars["geometry_memory"] = (
-            ", ".join(name for name in leaves if (memory_dir / name).is_file())
-            or "no exact task leaf"
-        )
     prompt_vars["memory_dir"] = str(memory_dir)
     # Per-cell inbox: parallel explore runs must not append to a shared file.
     prompt_vars["memory_inbox"] = str(memory_dir / "_internal" / "inbox" / recipe_tag)

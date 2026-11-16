@@ -87,6 +87,29 @@ Planner
 
 ``cancel_active_and_wait()`` 暂停接收新调用，向排队中和运行中的调用发送取消信号，并等待清理完成。长时间运行的处理函数在安全边界检查 ``raise_if_cancelled()``。规划器也排空旧请求后，通过 ``resume_calls()`` 恢复接收调用。``close()`` 永久关闭调用入口；子类应先调用 ``super().close()``，再保存录像或释放资源。
 
+.. _geometry-toolkit:
+
+通用 RGB-D 工具
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+机器人适配器按相机名称和步号读取记录，返回 ``toolkits.observation`` 中的
+``GeometryObservation``。RGB 图像须与米制世界坐标图对齐，也可以提供米制光轴深度、相机内参和相机到世界的变换。
+每帧都要标明世界坐标系。具名目标测量还需要相机位姿和世界坐标系的向上方向。
+通过 ``additional_observations`` 可以提供同一步的其他标定视角。
+机器人用 ``add_tool`` 注册所需工具，并注入观测适配器与模型客户端。
+
+* ``back_project`` 读取可见表面的坐标。传入相机、步号，以及选区 ``selection``。
+  选区包含选点图像的 ``image_shape`` （高、宽），并使用 ``points_rc`` 点列或 ``box_rc`` 矩形框（上、左、下、右，下界和右界不含在内）。
+  可用 ``height_m`` 按世界坐标系的向上方向筛选。深度无效或超出高度范围的点在原位置返回 null。
+* ``segment`` 接受文字、一个正提示点，或两者一起传入。两者同时使用时，文字掩膜覆盖提示点且达到分数阈值才返回候选坐标。
+  在预览图上选点时传入预览尺寸。结果包含掩膜和叠加图的保存位置。
+* ``geometry`` 接受目标描述 ``query``、相机和步号。工具内部通过本地 Molmo 选点并核验目标身份。
+  可以测量可见表面点、区域，也可以用 ``required_geometry`` 同时请求部位或尺寸，例如 ``["rim_center", "object_height"]``。
+  Planner 收到通过质量检查的数值、警告和证据引用。同一步各视角的证据仍然不足时，工具返回 ``insufficient_evidence``，交由 Planner 选择下一步。
+
+LIBERO 的 API Planner 默认开放 ``back_project`` 和 ``segment``，分割使用已连接的 SAM3 服务。
+需要额外启用 ``geometry`` 时，启动本地 Molmo 服务，并在 LIBERO 命令中加入 ``--geometry --molmo-endpoint "$MOLMO_ENDPOINT"``。
+
 进程间通信
 ----------
 

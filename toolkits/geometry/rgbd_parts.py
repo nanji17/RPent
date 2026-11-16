@@ -405,33 +405,3 @@ def cuboid_vertices(top, up, support_level, measured_height):
     ):
         return None
     return np.vstack((top, top - heights[:, None] * up)).tolist()
-
-
-def recover_top_face(world, valid, region, cloud, up):
-    """Restore planar material samples lost while removing mixed silhouette pixels."""
-    from scipy.ndimage import binary_dilation, label
-
-    face = _face(cloud, up)
-    if face is None:
-        return cloud
-    origin, normal, support = face
-    yy, xx = np.nonzero(region)
-    if not len(yy):
-        return cloud
-    margin = 5
-    roi = np.s_[
-        max(0, yy.min() - margin) : yy.max() + margin + 1,
-        max(0, xx.min() - margin) : xx.max() + margin + 1,
-    ]
-    w = world[roi]
-    footprint = region[roi]
-    plane = valid[roi] & (abs((w - origin) @ normal) <= 0.0022)
-    labels, count = label(plane & binary_dilation(footprint, iterations=4))
-    if not count:
-        return cloud
-    overlap = np.bincount(labels[footprint], minlength=count + 1)
-    overlap[0] = 0
-    if overlap.max() < 20:
-        return cloud
-    recovered = w[labels == np.argmax(overlap)]
-    return recovered if len(recovered) >= len(support) * 0.7 else cloud

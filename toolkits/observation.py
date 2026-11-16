@@ -16,11 +16,14 @@
 
 from __future__ import annotations
 
+import io
 from collections.abc import Iterable
 from dataclasses import dataclass, field
-from typing import Protocol
+from typing import Annotated, Protocol
 
 import numpy as np
+from PIL import Image
+from pydantic import BaseModel, ConfigDict, Field, FiniteFloat, model_validator
 
 
 def _snapshot(value: np.ndarray, dtype: type | None = None) -> np.ndarray:
@@ -51,7 +54,6 @@ class GeometryObservation:
     up_direction: np.ndarray | None = None
     valid_mask: np.ndarray | None = None
     source_refs: dict[str, str] = field(default_factory=dict)
-    source_dtype: str = field(init=False)
 
     def __post_init__(self) -> None:
         if not self.camera.strip() or not self.world_frame_id.strip() or self.step < 0:
@@ -100,7 +102,6 @@ class GeometryObservation:
             pixels = np.stack((cols, rows, np.ones(shape)), axis=-1)
             camera_points = (pixels @ np.linalg.inv(intrinsics).T) * depth[..., None]
             world = camera_points @ transform[:3, :3].T + transform[:3, 3]
-        object.__setattr__(self, "source_dtype", str(np.asarray(world).dtype))
         world = _snapshot(world, float)
         if world.shape != (*shape, 3):
             raise ValueError("world_xyz must match RGB with shape [H,W,3]")
@@ -138,24 +139,11 @@ class GeometryObservation:
             return (self.world_xyz - transform[:3, 3]) @ transform[:3, 2]
         return None
 
-    def metadata(self) -> dict:
-        """Describe the snapshot without embedding full sensor arrays in tool text."""
-        return {
-            "camera": self.camera,
-            "step": self.step,
-            "world_frame_id": self.world_frame_id,
-            "units": "m",
-            "image_shape": list(self.rgb.shape[:2]),
-            "source_dtype": self.source_dtype,
-            "camera_to_world": None
-            if self.camera_to_world is None
-            else self.camera_to_world.tolist(),
-            "intrinsics": None if self.intrinsics is None else self.intrinsics.tolist(),
-            "up_direction": None
-            if self.up_direction is None
-            else self.up_direction.tolist(),
-            "source_refs": self.source_refs,
-        }
+    def png_bytes(self) -> bytes:
+        """Encode the original RGB raster for the injected perception models."""
+        buffer = io.BytesIO()
+        Image.fromarray(self.rgb).save(buffer, format="PNG")
+        return buffer.getvalue()
 
 
 class ObservationProvider(Protocol):
@@ -174,3 +162,84 @@ class MultiViewObservationProvider(ObservationProvider, Protocol):
     ) -> Iterable[GeometryObservation]:
         """Yield other actual cameras in the same metric frame and identify their recorded step."""
         ...
+
+
+Index = Annotated[int, Field(strict=True, ge=0)]
+Size = Annotated[int, Field(strict=True, gt=0)]
+
+
+class ImageSelection(BaseModel):
+    """Native or resized full-frame pixels, with exclusive bottom/right box edges."""
+
+    model_config = ConfigDict(extra="forbid")
+    image_shape: Annotated[
+        list[Size],
+        Field(
+            min_length=2,
+            max_length=2,
+            description="Height and width of the image used to select these pixels.",
+        ),
+    ]
+    points_rc: (
+        Annotated[
+            list[Annotated[list[Index], Field(min_length=2, max_length=2)]],
+            Field(min_length=1, max_length=16),
+        ]
+        | None
+    ) = None
+    box_rc: Annotated[list[Index], Field(min_length=4, max_length=4)] | None = None
+    height_m: (
+        Annotated[list[FiniteFloat | None], Field(min_length=2, max_length=2)] | None
+    ) = None
+
+    @model_validator(mode="after")
+    def check_extent(self):
+        if (self.points_rc is None) == (self.box_rc is None):
+            raise ValueError("Supply points_rc or box_rc.")
+        h, w = self.image_shape
+        for i, (r, c) in enumerate(self.points_rc or ()):
+            if r >= h or c >= w:
+                raise ValueError(
+                    f"Pixel [{r}, {c}] at index {i} exceeds image_shape [{h}, {w}]. "
+                    f"Choose rows 0..{h - 1} and columns 0..{w - 1} on the same "
+                    "image used to declare image_shape."
+                )
+        if self.box_rc:
+            r0, c0, r1, c1 = self.box_rc
+            if not (r0 < r1 <= h and c0 < c1 <= w):
+                raise ValueError(
+                    f"box_rc={self.box_rc} is invalid for image_shape [{h}, {w}]. "
+                    f"Use 0 <= top < bottom <= {h} and 0 <= left < right <= {w}. "
+                    "Select the visible box on the same image used to declare image_shape."
+                )
+        if self.height_m is not None:
+            low, high = self.height_m
+            if low is not None and high is not None and low > high:
+                raise ValueError(
+                    "height_m is [low, high] in metres and requires low <= high."
+                )
+        return self
+
+    def native(self, obs: GeometryObservation):
+        """Map pixel centers and half-open boxes to the measured raster."""
+        h, w = self.image_shape
+        nh, nw = obs.rgb.shape[:2]
+        if h * nw != w * nh:
+            raise ValueError(
+                "Selection must use the full calibrated image at its original aspect ratio."
+            )
+        if self.points_rc is not None:
+            return [
+                (
+                    min(nh - 1, (2 * r + 1) * nh // (2 * h)),
+                    min(nw - 1, (2 * c + 1) * nw // (2 * w)),
+                )
+                for r, c in self.points_rc
+            ], None
+        r0, c0, r1, c1 = self.box_rc
+        return [], (
+            r0 * nh // h,
+            c0 * nw // w,
+            (r1 * nh + h - 1) // h,
+            (c1 * nw + w - 1) // w,
+        )

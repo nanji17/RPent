@@ -109,7 +109,6 @@ def foreground(world, valid, up, cam, rc, *, rgb=None, lightness=0):
         "anchor_distance_px": float(np.sqrt(cost[k])),
         "n_pixels": int(areas[k]),
         "nearby_components": int(np.count_nonzero(peers)),
-        "confirmation_radius_px": neighborhood,
         "selected_by_relative_lightness": bool(k != original),
     }
 

@@ -12,4 +12,4 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""RPent project toolkits for this checkout."""
+"""Reusable perception tools for calibrated RGB-D observations."""
