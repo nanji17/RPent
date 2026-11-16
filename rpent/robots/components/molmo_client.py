@@ -17,8 +17,9 @@ from __future__ import annotations
 
 import base64
 import io
+import math
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Literal
 
 import imageio.v2 as imageio
 import numpy as np
@@ -26,9 +27,35 @@ import numpy as np
 from rpent.utils.rpc import RpcClient
 
 
+def identity_prompt(query: str | None, *, isolated: bool = False) -> str:
+    """Ask the same local model to identify the candidate and its context."""
+    if query is None and not isolated:
+        return (
+            "Read the visible packaging. What product is it? Give its product name "
+            "and any brand or words you can make out. Use only this image. "
+            "If the product cannot be identified, answer unknown."
+        )
+    if query is None:
+        return (
+            "What object is shown on the gray background? Give its specific common name "
+            "in one short noun phrase. If its identity cannot be seen, answer unknown."
+        )
+    if isolated:
+        return (
+            f"Look at the isolated object on the gray background. Can you visually identify it as {query}? "
+            "Answer yes only if the visible appearance identifies the target. If it is a different "
+            "object, too blurry, or ambiguous, answer no. Answer yes or no."
+        )
+    return (
+        "The left image isolates a measured surface. The right shows the same "
+        f"surface with its surroundings. Is this surface part of {query}? "
+        "Use visible shape, color and context. Answer yes or no."
+    )
+
+
 @dataclass(frozen=True)
 class MolmoResult:
-    """One pixel Molmo would put the gripper on, if it found the object."""
+    """One visible pixel on the queried object or part, if found."""
 
     found: bool
     point_xy: tuple[float, float] | None = None
@@ -39,9 +66,18 @@ class MolmoResult:
 class MolmoClient:
     """Client wrapping the Molmo service over any :class:`RpcClient`."""
 
-    def __init__(self, client: RpcClient, *, timeout_s: float = 180.0) -> None:
+    def __init__(
+        self,
+        client: RpcClient,
+        *,
+        timeout_s: float = 180.0,
+        point_mode: Literal["manipulation", "geometry", "native"] = "manipulation",
+    ) -> None:
+        if point_mode not in ("manipulation", "geometry", "native"):
+            raise ValueError("point_mode must be manipulation, geometry or native")
         self._client = client
         self._timeout_s = timeout_s
+        self._point_mode = point_mode
 
     def ground(
         self,
@@ -52,7 +88,9 @@ class MolmoClient:
 
         The pixel comes back in the image's own resolution as ``(col, row)``,
         which is the order the model writes it in and the reverse of the
-        ``[row, col]`` that SAM3 takes.
+        ``[row, col]`` that SAM3 takes. Configure ``point_mode="geometry"``
+        for a material point on an exact part; the default retains Flash's
+        manipulation-point prompt.
         """
         if not isinstance(query, str) or not query.strip():
             raise ValueError("ground requires a non-empty query")
@@ -64,34 +102,64 @@ class MolmoClient:
         else:
             image_bytes = bytes(image)
 
+        kwargs = {
+            "image_base64": base64.b64encode(image_bytes).decode("ascii"),
+            "query": query.strip(),
+        }
+        # Keep existing Flash requests compatible with the default RPC contract.
+        if self._point_mode != "manipulation":
+            kwargs["point_mode"] = self._point_mode
         payload = self._client.call(
             "molmo.ground",
-            kwargs={
-                "image_base64": base64.b64encode(image_bytes).decode("ascii"),
-                "query": query.strip(),
-            },
+            kwargs=kwargs,
             timeout_s=self._timeout_s,
         )
         return self._decode_result(payload)
+
+    def verify(self, image: bytes, query: str | None, *, isolated: bool = False) -> str:
+        """Return the local model's answer for a candidate identity image."""
+        payload = self._client.call(
+            "molmo.verify",
+            kwargs={
+                "image_base64": base64.b64encode(image).decode("ascii"),
+                "query": query,
+                "isolated": isolated,
+            },
+            timeout_s=self._timeout_s,
+        )
+        if not isinstance(payload, dict) or not isinstance(payload.get("answer"), str):
+            raise RuntimeError("invalid Molmo identity response")
+        return payload["answer"]
 
     @staticmethod
     def _decode_result(payload: Any) -> MolmoResult:
         if not isinstance(payload, dict):
             raise RuntimeError(f"invalid Molmo ground response: {payload!r}")
         answer = payload.get("answer")
+        size = payload.get("image_size")
+        image_size = None
+        if size is not None:
+            if (
+                not isinstance(size, list)
+                or len(size) != 2
+                or any(type(value) is not int or value <= 0 for value in size)
+            ):
+                raise RuntimeError(f"invalid Molmo image_size: {size!r}")
+            image_size = (size[0], size[1])
         point = payload.get("point_xy")
         if point is None:
-            return MolmoResult(found=False, answer=answer)
+            return MolmoResult(found=False, image_size=image_size, answer=answer)
         if not isinstance(point, list) or len(point) != 2:
             raise RuntimeError(f"invalid Molmo point_xy: {point!r}")
-        size = payload.get("image_size")
+        try:
+            col, row = float(point[0]), float(point[1])
+        except (TypeError, ValueError) as exc:
+            raise RuntimeError(f"invalid Molmo point_xy: {point!r}") from exc
+        if not math.isfinite(col) or not math.isfinite(row):
+            raise RuntimeError(f"invalid Molmo point_xy: {point!r}")
         return MolmoResult(
             found=True,
-            point_xy=(float(point[0]), float(point[1])),
-            image_size=(
-                (int(size[0]), int(size[1]))
-                if isinstance(size, list) and len(size) == 2
-                else None
-            ),
+            point_xy=(col, row),
+            image_size=image_size,
             answer=answer,
         )

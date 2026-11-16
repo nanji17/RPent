@@ -41,6 +41,7 @@ from rpent.utils.logging import get_logger, get_output_dir
 if TYPE_CHECKING:
     from robots.libero.env_client import LiberoEnvClient
     from rpent.memory.manager import MemoryManager
+    from toolkits.geometry.perception import VisualGrounder
 
 logger = get_logger("libero_toolkit")
 
@@ -59,9 +60,17 @@ class LiberoToolkit(Toolkit):
         attempts_per_session: int = 0,
         state_output_dir: Path | str | None = None,
         policy_kind: str = "vla",
+        generic_tools: bool = False,
+        geometry_grounder: VisualGrounder | None = None,
+        geometry_only: bool = False,
+        geometry_inspection_experiment: bool = False,
     ) -> None:
         if mode not in {"evaluation", "exploration"}:
             raise ValueError(f"unsupported LIBERO toolkit mode: {mode!r}")
+        sam3 = runtime_kwargs.get("sam3_client")
+        self._generic_tools = generic_tools or geometry_grounder is not None
+        if self._generic_tools and not geometry_only and sam3 is None:
+            raise ValueError("Generic localization requires a SAM3 client.")
         self._state_output_dir = Path(state_output_dir or get_output_dir())
         state = EnvState(self._state_output_dir)
         super().__init__(
@@ -77,7 +86,59 @@ class LiberoToolkit(Toolkit):
         self._attempts_per_session: int = max(0, int(attempts_per_session))
         self._session_attempt: int = 1
         self.init_primitives(runtime_kwargs=runtime_kwargs)
-        self._register_libero_tools()
+        self._register_libero_tools(generic_tools=self._generic_tools)
+        self._planner_geometry = None
+        if self._generic_tools:
+            from robots.libero.geometry import LiberoGeometryObservations
+            from toolkits.back_project import back_project
+            from toolkits.segment import SegmentTool
+
+            observations = LiberoGeometryObservations(state)
+            if not geometry_only:
+                self.add_tool(
+                    back_project.with_handler(
+                        partial(back_project, observations=observations)
+                    )
+                )
+                self.add_tool(
+                    SegmentTool(
+                        observations=observations,
+                        state=state,
+                        segmenter=sam3,
+                    ).segment
+                )
+            self.add_tool(
+                replace(
+                    self._tools["view_env_state"].with_handler(
+                        partial(self._view_geometry_state, state=state)
+                    ),
+                    description="Read the recorded robot state and two calibrated scene previews with their camera names, sizes and full-image filenames.",
+                ),
+                replace=True,
+            )
+            if geometry_grounder is not None:
+                from robots.libero.geometry import PlannerGeometry, WristInspection
+                from toolkits.geometry.geometry_tool import GeometryTool
+
+                geometry = GeometryTool(
+                    state=state,
+                    grounder=geometry_grounder,
+                    segmenter=sam3,
+                    observations=observations,
+                    object_first=True,
+                    region_source="depth",
+                    segment_fallback=sam3 is not None,
+                    check_cancelled=self.raise_if_cancelled,
+                )
+                self._planner_geometry = PlannerGeometry(geometry, state)
+                self.add_tool(
+                    geometry.geometry.with_handler(self._planner_geometry.geometry)
+                )
+                self.add_tool(observations.placement_opening)
+                if geometry_inspection_experiment:
+                    self.add_tool(
+                        WristInspection(observations, geometry_grounder).inspection_pose
+                    )
         if policy_kind == "wam":
             finish = self._tools["finish"]
             self.add_tool(
@@ -99,12 +160,16 @@ class LiberoToolkit(Toolkit):
     # ------------------------------------------------------------------
     # Registration
     # ------------------------------------------------------------------
-    def _register_libero_tools(self) -> None:
+    def _register_libero_tools(self, *, generic_tools: bool) -> None:
         for definition in iter_tools(libero_tools):
+            if generic_tools and definition.name == "back_project":
+                continue
             self.add_tool(
                 definition.with_handler(partial(definition, state=self._state))
             )
         for definition in iter_tools(self._primitives):
+            if generic_tools and definition.name == "segment":
+                continue
             excluded = (
                 {"pi0_pick", "pi0_doubled"}
                 if self._policy_kind == "wam"
@@ -185,12 +250,20 @@ class LiberoToolkit(Toolkit):
         self._attempt += 1
         self._session_attempt += 1
         result = self._primitives.reset_episode(reason=reason)
+        if self._planner_geometry is not None:
+            self._planner_geometry.reset()
         result["attempt"] = self._attempt
         result["notice"] = (
             f"Episode restarted; this is attempt {self._attempt}. The original "
             "layout was restored. Re-run perception before acting."
         )
         return ToolResult(data=result)
+
+    @staticmethod
+    def _view_geometry_state(step: int = -1, *, state: EnvState) -> ToolResult:
+        from robots.libero.geometry import view_geometry_state
+
+        return view_geometry_state(state, step)
 
     def get_env_state(
         self,
@@ -224,7 +297,10 @@ class LiberoToolkit(Toolkit):
                     record.step_idx,
                     e,
                 )
-        out = libero_tools.view_env_state(record.step_idx, state=self._state)
+        if self._generic_tools:
+            out = self._view_geometry_state(record.step_idx, state=self._state)
+        else:
+            out = libero_tools.view_env_state(record.step_idx, state=self._state)
         out.data["agent_elapsed_s"] = elapsed_s
         if self._policy_kind == "wam" and (record.terminated or record.truncated):
             status = "success" if record.terminated else "failure"

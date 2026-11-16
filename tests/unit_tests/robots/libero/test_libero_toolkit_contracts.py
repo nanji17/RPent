@@ -171,6 +171,160 @@ def test_toolkit_factory_configures_memory_access_by_mode(
     assert captured[1]["attempts_per_session"] == 2
 
 
+def test_geometry_menu_registers_all_three_read_only_tools(
+    tmp_path, monkeypatch, fake_single_arm_primitives
+):
+    from toolkits.geometry.geometry_tool import GeometryTool
+
+    fake = fake_single_arm_primitives.for_robot(toolkit.libero_tools.LiberoPrimitives)
+    monkeypatch.setattr(toolkit.libero_tools, "LiberoPrimitives", fake)
+    monkeypatch.setattr(toolkit.libero_tools, "dump_state", lambda *a, **kw: _record())
+    monkeypatch.setattr(
+        templates, "default_variables", lambda: {"output_dir": str(tmp_path)}
+    )
+    prompts = []
+
+    def infer_mask(image, **kwargs):
+        prompts.append(kwargs)
+        return Sam3Result(
+            found=True, mask=np.ones((4, 4), dtype=bool), score=0.9, box=[0, 0, 4, 4]
+        )
+
+    sam = SimpleNamespace(segment=infer_mask)
+    connected = []
+    initialize = GeometryTool.__init__
+
+    def capture(self, **kwargs):
+        connected.append(kwargs["segmenter"])
+        initialize(self, **kwargs)
+
+    monkeypatch.setattr(GeometryTool, "__init__", capture)
+    menus = []
+    for enabled, geometry_only, generic in (
+        (False, False, False),
+        (False, False, True),
+        (True, False, False),
+        (True, True, False),
+    ):
+        tk = toolkit.LiberoToolkit(
+            runtime_kwargs={"env": object(), "sam3_client": sam},
+            geometry_grounder=object() if enabled else None,
+            generic_tools=generic,
+            geometry_only=geometry_only,
+            dashboard_events=NullDashboardEventSink(),
+            memory=MemoryManager(tmp_path / "memory"),
+            state_output_dir=tmp_path / f"{enabled}-{generic}-{geometry_only}",
+        )
+        menus.append(_tool_names(tk))
+        if enabled:
+            assert "geometry" in _readonly_names(tk)
+            assert {"observe_geometry", "inspection_pose"}.isdisjoint(menus[-1])
+        else:
+            assert "geometry" not in menus[-1]
+        if (enabled or generic) and not geometry_only:
+            assert {"back_project", "segment"} <= _readonly_names(tk)
+            assert {"camera", "selection", "step"} == set(
+                tk._tools["back_project"].input_schema["properties"]
+            )
+            with tk._state.record_step(state={}) as step:
+                tk._state.save(
+                    "agentview_high.png", np.zeros((4, 4, 3), np.uint8), step=step
+                )
+                xyz = np.ones((4, 4, 3))
+                xyz[3, 1] = [0.25, 0.5, 0.75]
+                tk._state.save("agentview_world_high.npz", xyz, step=step)
+                tk._state.save(
+                    "agentview_metadata.json",
+                    {
+                        "height": 4,
+                        "width": 4,
+                        "intrinsic_K": np.eye(3).tolist(),
+                        "extrinsic_cam2world": np.eye(4).tolist(),
+                    },
+                    step=step,
+                )
+            sample = tk.execute_tool(
+                "back_project",
+                {
+                    "camera": "agentview",
+                    "selection": {"image_shape": [2, 2], "points_rc": [[1, 0]]},
+                },
+            ).data
+            assert sample["status"] == "sampled"
+            assert sample["samples_xyz"] == [[0.25, 0.5, 0.75]]
+            assert sample["evidence_status"] == "identity_unchecked"
+            assert "world_xyz" not in sample
+            candidate = tk.execute_tool(
+                "segment",
+                {
+                    "camera": "agentview",
+                    "step": 0,
+                    "point": [1, 0],
+                    "image_shape": [2, 2],
+                },
+            )
+            assert prompts[-1] == {
+                "point": [3, 1],
+                "text_prompt": None,
+                "min_score": 0.2,
+            }
+            assert not candidate.is_error and candidate.data["found"]
+            assert candidate.data["evidence_status"] == "identity_unchecked"
+            assert candidate.data["world_xyz"] == [1, 1, 1]
+            assert tk._state.load(candidate.data["mask_artifact"], step=0).sum() == 16
+            assert candidate.images and tk._state.latest_step == 0
+    assert menus[0] <= menus[1]
+    assert menus[0] == menus[1]
+    assert menus[2] - menus[3] == {"back_project", "segment"}
+    assert menus[2] - menus[1] == {
+        "geometry",
+        "placement_opening",
+    }
+    assert connected == [sam, sam]
+    with pytest.raises(ValueError, match="requires a SAM3 client"):
+        toolkit.LiberoToolkit(
+            runtime_kwargs={"sam3_client": None},
+            geometry_grounder=object(),
+            dashboard_events=NullDashboardEventSink(),
+            memory=MemoryManager(tmp_path / "memory"),
+            state_output_dir=tmp_path / "missing-sam",
+        )
+
+
+def test_default_api_uses_generic_tools_with_geometry_opt_in(tmp_path):
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--planner", default="api")
+    parser.add_argument("--memory-profile")
+    parser.add_argument("--memory-dir")
+    parser.add_argument("--output-dir")
+    spec = robot_spec.get_robot_spec()
+    spec.add_cli_args(parser, False)
+    arguments = [
+        "--suite",
+        "libero_spatial_task",
+        "--task",
+        "0",
+        "--output-dir",
+        str(tmp_path / "run"),
+    ]
+    for flags, enabled in [
+        ([], False),
+        (["--no-geometry"], False),
+        (["--geometry", "--molmo-endpoint", "http://localhost:8118"], True),
+    ]:
+        args = parser.parse_args(arguments + flags)
+        config = spec.parse_config(args)
+        assert config.prompt_vars["generic_tools"]
+        assert config.prompt_vars["geometry"] is enabled
+        assert args.geometry is enabled
+        prompt = spec.prompts.render(
+            "system", variables={**config.prompt_vars, "output_dir": str(tmp_path)}
+        )
+        assert "points_rc" in prompt and "box_rc" in prompt
+        assert ("For geometry, give query" in prompt) is enabled
+        assert ("placement_opening" in prompt) is enabled
+
+
 def test_toolkit_modes_construct_with_fake_primitives(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
