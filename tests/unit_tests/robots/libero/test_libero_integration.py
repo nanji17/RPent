@@ -597,6 +597,37 @@ def test_recipe_exports_generic_segment_calls_without_geometry_masks(tmp_path):
     ]
 
 
+@pytest.mark.parametrize(
+    ("mode", "point"), [("text", None), ("text_with_point_check", [3, 5])]
+)
+def test_flash_plan_keeps_text_segment_anchors(tmp_path, mode, point):
+    from robots.libero.flash.generate import generate_flash_plan
+    from robots.libero.flash.replay import load
+
+    audit = tmp_path / "object_task_t0_s0.json"
+    audit.write_text(
+        json.dumps(
+            {"task_language": "put the cup on the plate", "libero_terminated": True}
+        )
+    )
+    recipe = tmp_path / "object_task_t0_s0_recipe.jsonl"
+    recipe.write_text(json.dumps({"action": "move_to", "xyz": [0.12, 0.2, 0.5]}))
+    record = {
+        "mode": mode,
+        "prompt": "the cup",
+        "point": point,
+        "found": True,
+        "world_xyz": [0.1, 0.2, 0.4],
+    }
+    (tmp_path / "segment_abc_000.json").write_text(json.dumps(record))
+
+    output = tmp_path / "flash"
+    generate_flash_plan(audit, recipe, output, segments=tmp_path)
+    program = load(output, "object_task_t0")
+    assert program["plan"][0]["anchor"] == "the cup"
+    assert program["locator_of"]["the cup"] == "segment"
+
+
 class _LiberoBackend:
     def __init__(self):
         self.executed = []

@@ -140,10 +140,11 @@ def _segment_anchors(segments: Path | None) -> list[dict[str, Any]]:
             continue
         if any(math.dist(point[:2], anchor["median_xy"]) < 0.03 for anchor in anchors):
             continue
+        text_mask = data.get("mode") in ("text", "text_with_point_check")
         anchors.append(
             {
                 "phrase": phrase,
-                "locator": "segment" if data.get("mode") == "text" else "molmo",
+                "locator": "segment" if text_mask else "molmo",
                 "camera": data.get("camera", "agentview"),
                 "score": data.get("score"),
                 "readings": [point],
